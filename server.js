@@ -5,110 +5,95 @@ const path = require('path');
 
 const app = express();
 app.use(express.json({ limit: '50mb' }));
-app.get('/', (req, res) => {
-    res.sendFile(path.join(__dirname, 'index.html'));
-});
 
 const PORT = process.env.PORT || 3000;
 const API_KEY = process.env.ROBLOX_API_KEY;
 const UNIVERSE_ID = process.env.UNIVERSE_ID;
 
-const ROBLOX_API_URL = `https://apis.roblox.com/cloud/v2/universes/${UNIVERSE_ID}/game-passes`;
+// Roblox Open Cloud Base URLs
+const GAMEPASS_API_URL = `https://apis.roblox.com/cloud/v2/universes/${UNIVERSE_ID}/game-passes`;
+const DEVPRODUCT_API_URL = `https://apis.roblox.com/developer-products/v2/universes/${UNIVERSE_ID}/developer-products`;
 
-// Migration API Endpoint
+app.get('/', (req, res) => {
+    res.sendFile(path.join(__dirname, 'index.html'));
+});
+
 app.post('/api/migrate', async (req, res) => {
     const { scriptText } = req.body;
+    if (!scriptText) return res.status(400).json({ success: false, error: "No script text provided." });
 
-    if (!API_KEY || !UNIVERSE_ID) {
-        return res.status(500).json({ 
-            success: false, 
-            error: "Server configuration missing. Please ensure ROBLOX_API_KEY and UNIVERSE_ID are set in your environment variables." 
-        });
-    }
-
-    if (!scriptText) {
-        return res.status(400).json({ success: false, error: "No script text provided." });
-    }
-
-    // Regex to match dictionary blocks like [3479991058] = { ... }
-    const blockRegex = /\[(\d+)\]\s*=\s*\{([\s\S]*?)\}/g;
+    const blockRegex = /\\s*\\[(\\d+)\\]\\s*=\\s*\\{([\\s\\S]*?)\\}/g;
     let match;
     const mappings = {};
 
-    // Phase 1: Parse the script to extract old IDs and their associated display names
     while ((match = blockRegex.exec(scriptText)) !== null) {
         const oldId = match[1];
         const blockContent = match[2];
         
-        // Find the value assigned to "Display"
-        const displayMatch = /\["Display"\]\s*=\s*"([^"]+)"/.exec(blockContent) || /Display\s*=\s*"([^"]+)"/.exec(blockContent);
+        const displayMatch = /\\["Display"\\]\\s*=\\s*"([^"]+)"/.exec(blockContent) || /Display\\s*=\\s*"([^"]+)"/.exec(blockContent);
+        const typeMatch = /\\["Type"\\]\\s*=\\s*"([^"]+)"/.exec(blockContent) || /Type\\s*=\\s*"([^"]+)"/.exec(blockContent);
         
         if (displayMatch && !mappings[oldId]) {
+            const assetName = displayMatch[1];
+            const assetType = typeMatch ? typeMatch[1] : "DeveloperProduct"; // Fallback default
+            
+            // Determine if it should be treated as a Game Pass or Developer Product
+            const isGamePass = assetType.toLowerCase().includes("gamepass");
+
             mappings[oldId] = {
-                name: displayMatch[1],
+                name: assetName,
+                isGamePass: isGamePass,
                 newId: null,
                 status: 'Pending'
             };
         }
     }
 
-    const totalAssets = Object.keys(mappings).length;
-    if (totalAssets === 0) {
-        return res.status(400).json({ success: false, error: "No valid configuration items or 'Display' fields detected in the provided script text." });
-    }
-
-    console.log(`[Migration] Found ${totalAssets} unique assets to re-upload.`);
-
-    // Phase 2: Sequential execution loop to hit the Roblox Open Cloud API
+    // Process Loop
     for (const oldId in mappings) {
-        const assetName = mappings[oldId].name;
-        console.log(`[Roblox API] Creating gamepass: "${assetName}"...`);
-
+        const item = mappings[oldId];
         try {
-            const response = await axios.post(ROBLOX_API_URL, {
-                displayName: assetName,
-                description: "Auto-migrated configuration asset."
-            }, {
-                headers: {
-                    'x-api-key': API_KEY,
-                    'content-type': 'application/json'
-                }
-            });
+            let response;
+            
+            if (item.isGamePass) {
+                // Upload to Game Pass Endpoint
+                response = await axios.post(GAMEPASS_API_URL, {
+                    displayName: item.name,
+                    description: "Migrated Game Pass"
+                }, { headers: { 'x-api-key': API_KEY, 'content-type': 'application/json' } });
+                
+                const resourceName = response.data.name;
+                item.newId = resourceName.split('/').pop();
+            } else {
+                // Upload to Developer Product Endpoint
+                response = await axios.post(DEVPRODUCT_API_URL, {
+                    displayName: item.name,
+                    description: "Migrated Developer Product",
+                    price: 10 // Default placeholder price requirement for dev products
+                }, { headers: { 'x-api-key': API_KEY, 'content-type': 'application/json' } });
+                
+                // Dev products return JSON containing a direct numeric id or productId field
+                item.newId = response.data.productId || response.data.id;
+            }
 
-            // Open Cloud returns resource path format: "universes/X/game-passes/Y"
-            const resourceName = response.data.name;
-            const newId = resourceName.split('/').pop();
-
-            mappings[oldId].newId = newId;
-            mappings[oldId].status = 'Success';
-            console.log(`[Success] Mapped Old ID ${oldId} -> New ID ${newId}`);
-
-            // 1-second cooldown per loop to respect Roblox Open Cloud rate limits
-            await new Promise(resolve => setTimeout(resolve, 1000));
-
+            item.status = 'Success';
+            await new Promise(resolve => setTimeout(resolve, 1000)); // Rate limit buffer
         } catch (error) {
-            mappings[oldId].status = 'Failed';
-            console.error(`[Error] Failed to migrate asset "${assetName}" (${oldId}):`, error.response ? error.response.data : error.message);
+            item.status = 'Failed';
+            console.error(`Failed asset: ${item.name}`, error.response ? error.response.data : error.message);
         }
     }
 
-    // Phase 3: Token replacement inside the original string layout
+    // Replace IDs in string
     let updatedScript = scriptText;
     for (const oldId in mappings) {
         if (mappings[oldId].newId) {
-            // Replaces bracketed instances safely like [3385875609] -> [NewID]
-            const regex = new RegExp(`\\[${oldId}\\]`, 'g');
+            const regex = new RegExp(`\\\\[${oldId}\\\\]`, 'g');
             updatedScript = updatedScript.replace(regex, `[${mappings[oldId].newId}]`);
         }
     }
 
-    res.json({
-        success: true,
-        updatedScript: updatedScript,
-        summary: mappings
-    });
+    res.json({ success: true, updatedScript, summary: mappings });
 });
 
-app.listen(PORT, () => {
-    console.log(`🚀 Automated Migration Backend listening on port ${PORT}`);
-});
+app.listen(PORT, () => console.log(`🚀 Migrator active on port ${PORT}`));
