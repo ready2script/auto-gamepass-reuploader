@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Roblox Configuration Migrator Tool</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background-color: #0f172a;
+            color: #f8fafc;
+            margin: 0;
+            padding: 40px 20px;
+        }
+        .container {
+            max-width: 1100px;
+            margin: 0 auto;
+        }
+        h1 {
+            color: #38bdf8;
+            margin-bottom: 5px;
+        }
+        p.subtitle {
+            color: #94a3b8;
+            margin-top: 0;
+            margin-bottom: 30px;
+        }
+        .grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+        }
+        @media (max-width: 768px) {
+            .grid { grid-template-columns: 1fr; }
+        }
+        .panel {
+            background-color: #1e293b;
+            padding: 20px;
+            border-radius: 8px;
+            border: 1px solid #334155;
+        }
+        label {
+            display: block;
+            font-weight: 600;
+            margin-bottom: 8px;
+            color: #cbd5e1;
+        }
+        textarea {
+            width: 100%;
+            height: 450px;
+            background-color: #020617;
+            color: #38bdf8;
+            border: 1px solid #475569;
+            border-radius: 6px;
+            padding: 12px;
+            font-family: "Fira Code", Monaco, Consolas, monospace;
+            font-size: 13px;
+            resize: vertical;
+            box-sizing: border-box;
+        }
+        button {
+            background-color: #0284c7;
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            font-size: 15px;
+            font-weight: 600;
+            border-radius: 6px;
+            cursor: pointer;
+            margin-top: 15px;
+            width: 100%;
+            transition: background 0.2s;
+        }
+        button:hover {
+            background-color: #0369a1;
+        }
+        button:disabled {
+            background-color: #475569;
+            cursor: not-allowed;
+        }
+        .log-panel {
+            margin-top: 20px;
+            max-height: 200px;
+            overflow-y: auto;
+            background-color: #020617;
+            border: 1px solid #334155;
+            padding: 15px;
+            border-radius: 6px;
+            font-family: monospace;
+            font-size: 13px;
+        }
+        .status-badge {
+            display: inline-block;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-size: 11px;
+            font-weight: bold;
+        }
+        .success { background-color: #16a34a; color: white; }
+        .failed { background-color: #dc2626; color: white; }
+        .pending { background-color: #d97706; color: white; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Roblox Configuration Migrator Tool</h1>
+        <p class="subtitle">Paste your dumped dictionary table code below to auto-upload gamepasses via Open Cloud and generate a patched script.</p>
+        
+        <div class="grid">
+            <div class="panel">
+                <label for="inputScript">Source Luau Script Text</label>
+                <textarea id="inputScript" placeholder="Paste your source script here containing lines like [3385875609] = { ['Display'] = 'VIP' }..."></textarea>
+                <button id="migrateBtn" onclick="startMigration()">Run Migration Server Hook</button>
+            </div>
+            
+            <div class="panel">
+                <label for="outputScript">Patched Output Script</label>
+                <textarea id="outputScript" readonly placeholder="Your new script with freshly generated IDs will populate here..."></textarea>
+                <button id="copyBtn" onclick="copyToClipboard()" style="background-color: #475569;">Copy Output Script</button>
+            </div>
+        </div>
+
+        <div class="panel" style="margin-top: 20px;">
+            <label>Live Migration Job Summary</label>
+            <div id="logOutput" class="log-panel">System standby. Awaiting script compilation submission...</div>
+        </div>
+    </div>
+
+    <script>
+        async function startMigration() {
+            const scriptText = document.getElementById('inputScript').value.trim();
+            const migrateBtn = document.getElementById('migrateBtn');
+            const logOutput = document.getElementById('logOutput');
+            const outputScript = document.getElementById('outputScript');
+
+            if(!scriptText) {
+                alert("Please paste a source script into the text area before running.");
+                return;
+            }
+
+            migrateBtn.disabled = true;
+            migrateBtn.innerText = "Processing Queue (Applying 1s Rate Limits)...";
+            logOutput.innerHTML = "Submitting conversion matrix payload to server backend...";
+            outputScript.value = "";
+
+            try {
+                const response = await fetch('/api/migrate', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ scriptText })
+                });
+
+                const data = await response.json();
+
+                if (data.success) {
+                    outputScript.value = data.updatedScript;
+                    
+                    let htmlLog = "<strong>Migration Complete! Summary of transformations:</strong><br><br>";
+                    for (const [oldId, item] of Object.entries(data.summary)) {
+                        const badgeClass = item.status === 'Success' ? 'success' : (item.status === 'Failed' ? 'failed' : 'pending');
+                        htmlLog += `• Asset: <strong>${item.name}</strong> | Old ID: <code>${oldId}</code> → New ID: <code>${item.newId || 'N/A'}</code> | <span class="status-badge ${badgeClass}">${item.status}</span><br>`;
+                    }
+                    logOutput.innerHTML = htmlLog;
+                } else {
+                    logOutput.innerHTML = `<span style="color:#ef4444;">Error processing migration: ${data.error}</span>`;
+                }
+            } catch (err) {
+                logOutput.innerHTML = `<span style="color:#ef4444;">Drastic communication failure with API service: ${err.message}</span>`;
+            } finally {
+                migrateBtn.disabled = false;
+                migrateBtn.innerText = "Run Migration Server Hook";
+            }
+        }
+
+        function copyToClipboard() {
+            const copyText = document.getElementById("outputScript");
+            if (!copyText.value) return alert("Nothing to copy yet!");
+            copyText.select();
+            copyText.setSelectionRange(0, 99999);
+            navigator.clipboard.writeText(copyText.value);
+            alert("Patched script copied to clipboard!");
+        }
+    </script>
+</body>
+</html>
